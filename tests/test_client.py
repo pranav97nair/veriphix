@@ -4,6 +4,7 @@ import networkx as nx
 import numpy as np
 import pytest
 from graphix import Measurement, OpenGraph
+from graphix.command import CommandKind
 from graphix.measurements import Outcome
 from graphix.random_objects import rand_circuit
 from graphix.sim.statevec import StatevectorBackend
@@ -13,11 +14,40 @@ from stim import PauliString
 from typing_extensions import override
 
 from veriphix.blinding import Secrets
-from veriphix.client import Client, ClientMeasureMethod
+from veriphix.client import CleanPattern, Client, ClientMeasureMethod
 from veriphix.verifying import ComputationRun
 
 
 class TestClient:
+    def test_clean_pattern(self, fx_rng: Generator) -> None:
+        """
+        Test to check that the CleanPattern class accurately removes the measurement angles and by-products from a pattern.
+        """
+        nqubits = 2
+        depth = 1
+        circuit = rand_circuit(nqubits, depth, fx_rng)
+        pattern = circuit.transpile().pattern
+        pattern.standardize()
+        clean_pattern = CleanPattern.from_pattern(pattern)
+
+        # Check public pattern has no information on measurement angles and no corrections
+        for cmd in clean_pattern.public:
+            if cmd.kind == CommandKind.M:
+                with pytest.raises(AttributeError):
+                    _ = cmd.measurement
+            else:
+                assert cmd.kind not in (CommandKind.X, CommandKind.Z)
+
+        # Check measurement and by-product data was stored correctly as private data
+        for node, cmd in pattern.measurement_commands().items():
+            assert clean_pattern.private.measurements[node] == cmd
+        for cmd in pattern.correction_commands():
+            # if cmd in pattern.output_nodes: ?
+            if cmd.kind == CommandKind.X:
+                assert clean_pattern.private.x_byproducts[cmd.node] == cmd.domain
+            else:
+                assert clean_pattern.private.z_byproducts[cmd.node] == cmd.domain
+
     def test_standardize(self, fx_rng: Generator) -> None:
         """
         Test to check that the Client-Server delegation works with standardized patterns
