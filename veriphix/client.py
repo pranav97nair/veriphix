@@ -18,6 +18,7 @@ from typing_extensions import override
 
 from veriphix.blinding import SecretDatas, Secrets
 from veriphix.malicious_noise_model import MaliciousNoiseModel
+from veriphix.measure import DelegateMeasureMethod
 from veriphix.protocols import FK12, VerificationProtocol
 from veriphix.verifying import (
     ComputationRun,
@@ -28,7 +29,7 @@ from veriphix.verifying import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Iterator, Sequence
     from typing import TypeVar
 
     import networkx as nx
@@ -401,3 +402,56 @@ class TestMeasureMethod(BlindMeasureMethod):
         angle = self._client.secret_datas.blind_angle(cmd.node)
 
         return Measurement.XY(angle)
+
+
+type RunOrTest[Run] = Run | tuple[Run, Test]
+
+type RunAndTests[Run] = Iterator[RunOrTest[Run]]
+
+type BitString = Sequence[bool, ...]
+
+@dataclass
+class DelegationRounds:
+    n_compute: int
+    n_test: int
+
+@dataclass
+class DelegationParameters[Data]:
+    rounds: DelegationRounds
+    strategy: ...#VerificationStrategy[Data] # or DelegationStrategy?
+
+@dataclass
+class Runnable:
+    public: Pattern
+    measure_method: MeasureMethod
+    prepare_method: PrepareMethod
+
+
+class ClientV2:
+    def __init__(self, secrets: Secrets | None = None) -> None:
+        self.secrets: Secrets = secrets or Secrets()
+
+    def delegate_run(self, clean_pattern: CleanPattern, input_state: Sequence[BasicState], rng: Generator | None = None,
+    *,
+    stacklevel: int = 1,) -> Runnable:
+        rng = ensure_rng(rng, stacklevel=stacklevel + 1)
+        secret_data = SecretDatas.from_secrets(
+            self.secrets,
+            clean_pattern.public.graph,
+            set(clean_pattern.public.input_nodes),
+            set(clean_pattern.public.output_nodes),
+            rng=rng,
+        )
+        # [MUN] The two commented lines below are pseucode from meeting with Sami:
+        # #decoding_keys = Blindness.propagate(secrets.a, secrets.r, public.graph) # -> r'(i) = r(i) ^ a_N(i)
+        # #measure_method = MeasureMethod(private, secrets.a, secrets.theta, decoding_keys)
+        # I believe that "Blindness.propagate" is currently done by DelegateMeasureMethod.store_measurement_outcome.
+        # Eventually, we'll refactor that, so that all the r' keys are precomputed and passed to DelegateMeasureMethod
+        #
+        measure_method = DelegateMeasureMethod(secret_data, clean_pattern.private)
+
+        prepare_method = PrepareMethod(state, secrets) # Prepares blinded states in SV Backend
+
+        return Runnable(clean_pattern.public, measure_method, prepare_method)
+
+    # def delegate_verify(blind_pattern: BlindPattern, input_stte: Sequence[BasicState], protocol: VerificationProtocol) -> RunAndTests[Runnable]: ...

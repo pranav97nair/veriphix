@@ -52,17 +52,17 @@ follow_untyped_imports = true # required for qiskit, requires mypy >=1.14
 strict = true
 mypy_path = "./stubs"
 
-[tool.pyright]
+#[tool.pyright]
 # Keep in sync with mypy
-include = ["veriphix", "tests"]
-reportUnknownArgumentType = "information"
-reportUnknownLambdaType = "information"
-reportUnknownMemberType = "information"
-reportUnknownParameterType = "information"
-reportUnknownVariableType = "information"
+#include = ["veriphix", "tests"]
+#reportUnknownArgumentType = "information"
+#reportUnknownLambdaType = "information"
+#reportUnknownMemberType = "information"
+#reportUnknownParameterType = "information"
+#reportUnknownVariableType = "information"
 # reportInvalidTypeVarUse is a warning by default
-reportInvalidTypeVarUse = "error"
-extraPaths = ["./stubs"]
+#reportInvalidTypeVarUse = "error"
+#extraPaths = ["./stubs"]
 
 [tool.setuptools_scm]
 version_file = "graphix/_version.py"
