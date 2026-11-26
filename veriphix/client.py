@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from numpy.random import Generator
 
     _StateT = TypeVar("_StateT")
+    type MeasuredNode = int
+    type OutputNode = int
+    type Domain = frozenset[MeasuredNode]
 
 
 @dataclass
@@ -455,3 +458,65 @@ class ClientV2:
         return Runnable(clean_pattern.public, measure_method, prepare_method)
 
     # def delegate_verify(blind_pattern: BlindPattern, input_stte: Sequence[BasicState], protocol: VerificationProtocol) -> RunAndTests[Runnable]: ...
+@dataclass
+class PrivateData:
+    """The extracted private information from an MBQC pattern - a mapping of measured nodes to the measurement,
+    and two mappings of output nodes to domains representing the pattern's X and Z correction functions."""
+
+    measurements: dict[MeasuredNode, Command.M]
+    x_byproducts: dict[OutputNode, Domain]
+    z_byproducts: dict[OutputNode, Domain]
+
+
+@dataclass
+class CleanPattern:
+    """An MBQC pattern without any measurement angles and by-products. The "cleaned" pattern is represented by the `public` attribute, and the extracted information is stored inside the `private` parameter."""
+
+    public: Pattern
+    private: PrivateData
+
+    @staticmethod
+    def from_pattern(pattern: Pattern) -> CleanPattern:
+        """
+        Extract the measurement angles and by-products from an MBQC pattern.
+
+        Parameters
+        ----------
+        pattern: Pattern
+            An MBQC pattern to be delegated blindly to a Server.
+
+        Returns
+        -------
+        CleanPattern
+            A data structure containing the extracted information as an attribute called `private` and the
+            "cleaned" pattern as `public`.
+        """
+        public = Pattern(pattern.input_nodes)
+        measurements = {}
+        x_byproducts = {}
+        z_byproducts = {}
+
+        for cmd in pattern:
+            match cmd.kind:
+                # The following replicates the combined action of the methods `get_byproduct_db`
+                # and `remove_flow`, wherein all X and Z commands are excluded from the new pattern,
+                # but the by-products are extracted only if they apply to output nodes.
+                # To be discussed why we do not extract corrections on non-output nodes.
+                case CommandKind.Z:
+                    if cmd.node in pattern.output_nodes:
+                        z_byproducts[cmd.node] = frozenset(cmd.domain)
+                case CommandKind.X:
+                    if cmd.node in pattern.output_nodes:
+                        x_byproducts[cmd.node] = frozenset(cmd.domain)
+                case CommandKind.M:
+                    measurements[cmd.node] = cmd
+                    new_cmd: BaseCommand = BaseM(node=cmd.node)
+                case _:
+                    new_cmd = cmd
+
+            public.add(cast("CommandType", new_cmd))
+
+        public.reorder_output_nodes(pattern.output_nodes)
+        private = PrivateData(measurements, x_byproducts, z_byproducts)
+
+        return CleanPattern(public, private)
