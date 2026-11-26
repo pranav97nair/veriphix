@@ -1,23 +1,26 @@
-from graphix import MeasureMethod
-from veriphix.blinding import SecretDatas
-from dataclasses import dataclass
+from __future__ import annotations
+
 import dataclasses
-from graphix.measurements import BlochMeasurement, toggle_outcome
-
-
-from graphix import St
-
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from graphix.clifford import Clifford
+from graphix.measurements import BlochMeasurement, toggle_outcome
+from graphix.simulator import MeasureMethod
+from typing_extensions import override
+
 if TYPE_CHECKING:
+    from graphix.command import BaseM
     from graphix.measurements import Outcome
-    from graphix.command import Command, BaseM
+    from verifying.client import PrivateData
+
+    from veriphix.blinding import SecretDatas
+
 
 @dataclass
 class DelegateMeasureMethod(MeasureMethod):
-
     secret_data: SecretDatas
-    private: Private
+    private: PrivateData
     results: dict[int, Outcome] = dataclasses.field(default_factory=dict)
 
     @override

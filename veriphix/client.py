@@ -19,6 +19,7 @@ from typing_extensions import override
 from veriphix.blinding import SecretDatas, Secrets
 from veriphix.malicious_noise_model import MaliciousNoiseModel
 from veriphix.measure import DelegateMeasureMethod
+from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
 from veriphix.protocols import FK12, VerificationProtocol
 from veriphix.verifying import (
     ComputationRun,
@@ -29,7 +30,7 @@ from veriphix.verifying import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Mapping
     from typing import TypeVar
 
     import networkx as nx
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from numpy.random import Generator
 
     _StateT = TypeVar("_StateT")
+    type Node = int
     type MeasuredNode = int
     type OutputNode = int
     type Domain = frozenset[MeasuredNode]
@@ -407,21 +409,17 @@ class TestMeasureMethod(BlindMeasureMethod):
         return Measurement.XY(angle)
 
 
-type RunOrTest[Run] = Run | tuple[Run, Test]
-
-type RunAndTests[Run] = Iterator[RunOrTest[Run]]
-
-type BitString = Sequence[bool, ...]
-
 @dataclass
 class DelegationRounds:
     n_compute: int
     n_test: int
 
+
 @dataclass
 class DelegationParameters[Data]:
     rounds: DelegationRounds
-    strategy: ...#VerificationStrategy[Data] # or DelegationStrategy?
+    strategy: ...  # VerificationStrategy[Data] # or DelegationStrategy?
+
 
 @dataclass
 class Runnable:
@@ -434,30 +432,54 @@ class ClientV2:
     def __init__(self, secrets: Secrets | None = None) -> None:
         self.secrets: Secrets = secrets or Secrets()
 
-    def delegate_run(self, clean_pattern: CleanPattern, input_state: Sequence[BasicState], rng: Generator | None = None,
-    *,
-    stacklevel: int = 1,) -> Runnable:
+    def build_runnable(
+        self,
+        clean_pattern: CleanPattern,
+        states_mapping: Mapping[Node, State],
+        rng: Generator | None = None,
+        *,
+        stacklevel: int = 1,
+    ) -> Runnable:
         rng = ensure_rng(rng, stacklevel=stacklevel + 1)
+        # Secrets should be refactored
         secret_data = SecretDatas.from_secrets(
             self.secrets,
-            clean_pattern.public.graph,
+            clean_pattern.public.to_opengraph().graph,
             set(clean_pattern.public.input_nodes),
             set(clean_pattern.public.output_nodes),
             rng=rng,
         )
-        # [MUN] The two commented lines below are pseucode from meeting with Sami:
+        # [MUN] The two commented lines below are pseudocode from meeting with Sami:
         # #decoding_keys = Blindness.propagate(secrets.a, secrets.r, public.graph) # -> r'(i) = r(i) ^ a_N(i)
         # #measure_method = MeasureMethod(private, secrets.a, secrets.theta, decoding_keys)
         # I believe that "Blindness.propagate" is currently done by DelegateMeasureMethod.store_measurement_outcome.
         # Eventually, we'll refactor that, so that all the r' keys are precomputed and passed to DelegateMeasureMethod
-        #
+
+        # [MUN] Since we pass the "measure_method" to the backend, won't the server have access to the private data then?
         measure_method = DelegateMeasureMethod(secret_data, clean_pattern.private)
 
-        prepare_method = PrepareMethod(state, secrets) # Prepares blinded states in SV Backend
+        # states_mapping maps a blinded state to ALL nodes, inputs and ancillas
+        preparation_bank = self.blind_states(states_mapping)
+        prepare_method = ClientPrepareMethodV2(preparation_bank)
+
+        # At this stage, input nodes have not been addded the backend, but the prepare method has the capability to do so.
+        # This is the responsability of the method who runs the protocol
 
         return Runnable(clean_pattern.public, measure_method, prepare_method)
 
+    def blind_states(self, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
+        """
+        The Client creates the qubits and blind them in its preparation_bank
+        """
+        # Should we have "blind_state" instead of "blind_qubit" ?
+        return {
+            node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
+            for node, state in states_mapping.items()
+        }
+
     # def delegate_verify(blind_pattern: BlindPattern, input_stte: Sequence[BasicState], protocol: VerificationProtocol) -> RunAndTests[Runnable]: ...
+
+
 @dataclass
 class PrivateData:
     """The extracted private information from an MBQC pattern - a mapping of measured nodes to the measurement,
