@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from array import array
 from collections import deque
 from collections.abc import Callable
+from enum import Enum
 from functools import reduce
 from operator import mul
 from typing import TYPE_CHECKING, TypeAlias
@@ -360,3 +362,8 @@ class Dummyless(VerificationProtocol):
 
         # Step 3: build TestRuns — each generator's node_indices form one multi-qubit trap
         return [TestRun(client=client, traps=frozenset({frozenset(gs.node_indices)})) for gs in generators]
+
+
+class Round(Enum):
+    Computation = enum.auto()
+    Test = enum.auto()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, assert_never, cast
 
 import stim
 from graphix import Plane
@@ -20,7 +20,7 @@ from veriphix.blinding import SecretDatas, Secrets
 from veriphix.malicious_noise_model import MaliciousNoiseModel
 from veriphix.measure import DelegateMeasureMethod
 from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
-from veriphix.protocols import FK12, VerificationProtocol
+from veriphix.protocols import FK12, Round, VerificationProtocol
 from veriphix.verifying import (
     ComputationRun,
     ResultAnalysis,
@@ -30,7 +30,7 @@ from veriphix.verifying import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from typing import TypeVar
 
     import networkx as nx
@@ -422,17 +422,22 @@ class DelegationParameters[Data]:
 
 
 @dataclass
-class Runnable:
+class Runnable:  # tobe renamed Run
     public: Pattern
     measure_method: MeasureMethod
     prepare_method: PrepareMethod
+
+
+type Test = frozenset[frozenset[int]]  ### to be defiend as a proper dataclass
+
+type RunOrTestRun = Runnable | tuple[Runnable, Test]
 
 
 class ClientV2:
     def __init__(self, secrets: Secrets | None = None) -> None:
         self.secrets: Secrets = secrets or Secrets()
 
-    def build_runnable(
+    def build_run(
         self,
         clean_pattern: CleanPattern,
         states_mapping: Mapping[Node, State],
@@ -444,6 +449,7 @@ class ClientV2:
         # Secrets should be refactored
         secret_data = SecretDatas.from_secrets(
             self.secrets,
+            # We are standardizing every time we generate a run, we should store the graph somewhere
             clean_pattern.public.to_opengraph().graph,
             set(clean_pattern.public.input_nodes),
             set(clean_pattern.public.output_nodes),
@@ -467,6 +473,60 @@ class ClientV2:
 
         return Runnable(clean_pattern.public, measure_method, prepare_method)
 
+    def stream_runs(
+        self,
+        clean_pattern: CleanPattern,
+        input_state: Sequence[BasicStates],
+        protocol: VerificationProtocol,
+        rng: Generator | None = None,
+        *,
+        stacklevel: int = 1,
+    ) -> Iterator[RunOrTestRun]:
+        # Add support for input_state = None
+
+        computation_states_mapping = ClientV2.generate_computation_states(clean_pattern.public, input_state)
+
+        graph_clifford_structure = get_graph_clifford_structure(clean_pattern.public.to_opengraph().graph)
+
+        # [MUN]
+        # This was in Sami's notes. What is it for??
+        #
+        # test_private_data={
+        # i: (0, [], [])
+        # for i in public.nodes
+        # }
+
+        for r in protocol.rounds():  # shuffle(['c']*protocol.n_comp_rounds + ['t']*protocol.n_test_rounds)
+            match r:
+                case Round.Computation:
+                    yield self.build_run(clean_pattern, computation_states_mapping, rng, stacklevel=stacklevel + 1)
+                case Round.Test:
+                    test = protocol.strategy.sample_test()  # returns a Test
+                    test_states_mapping = test.generate_state_mapping(
+                        graph_clifford_structure, input_state
+                    )  # It may need info about the patterns nodes, and the input nodes.
+                    # test_states_mapping is a dict[Node, State], for all the nodes in the graph. Unblinded states
+
+                    yield test, self.build_run(clean_pattern, test_states_mapping, rng, stacklevel=stacklevel + 1)
+                case _:
+                    assert_never(r)
+
+    @staticmethod
+    def generate_computation_states(public: Pattern, input_state: Sequence[BasicStates]) -> dict[Node, BasicStates]:
+        """Return the (unblinded) state in which each node is prepared.
+
+        These states do not depend on the secrets: input nodes are prepared in
+        the specific input state desired by the Client, and every other node is
+        prepared in ``|+>`` by default. Because they are secret-independent, the
+        computation states never need to be refreshed; the secret-dependent
+        blinding is applied separately at the blindness level (see
+        :meth:`SecretDatas.blind_qubit`).
+        """
+        states_mapping = dict(zip(public.input_nodes, input_state, strict=True))
+        states_mapping.update((node, BasicStates.PLUS) for node in public.nodes if node not in states_mapping)
+
+        return states_mapping
+
     def blind_states(self, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
         """
         The Client creates the qubits and blind them in its preparation_bank
@@ -476,8 +536,6 @@ class ClientV2:
             node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
             for node, state in states_mapping.items()
         }
-
-    # def delegate_verify(blind_pattern: BlindPattern, input_stte: Sequence[BasicState], protocol: VerificationProtocol) -> RunAndTests[Runnable]: ...
 
 
 @dataclass

@@ -100,6 +100,10 @@ def merge(strings: list[PauliString]) -> PauliString:
     return common_string
 
 
+# This should be methods of `Test`
+# All the stabilizer building workflow should be encapsaulated in a single method `Test.generate_test_state_mapping -> Mapping[Node, PlanarState]` which is called by Client.
+
+
 def generate_eigenstate(stabilizer: PauliString) -> list[PlanarState]:
     states = []
     for pauli in stabilizer:  # type: ignore[attr-defined]
