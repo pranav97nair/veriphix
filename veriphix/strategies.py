@@ -17,7 +17,7 @@ from veriphix.protocols import GraphStabilizer, OddPairGeneratorFn, odd_pair_gen
 
 type Trap = frozenset[int]
 type Node = int
-type Data = nx.Graph | set[Node]
+type Graph = nx.Graph[int]
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -31,12 +31,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class Test:
-    graph: nx.Graph[int]
+    graph: Graph
     traps: frozenset[Trap]
     stabilizer: PauliString
 
 
-def get_graph_clifford_structure(graph: nx.Graph[int]) -> stim.Tableau:
+def get_graph_clifford_structure(graph: Graph) -> stim.Tableau:
     circuit = stim.Circuit()
     for edge in graph.edges:
         i, j = edge
@@ -69,7 +69,7 @@ def disjoint_sets(sets: Iterable[AbstractSet[_T]]) -> bool:
 
 
 # [MUN] TODO: Check if we can use Graphix PauliString to drop stim dep.
-def build_stabilizer(traps: frozenset[Trap], graph: nx.Graph[int], measurement_basis: Axis = Axis.X) -> PauliString:
+def build_stabilizer(traps: frozenset[Trap], graph: Graph, measurement_basis: Axis = Axis.X) -> PauliString:
     nqubits = len(graph.nodes)
     clifford_structure = get_graph_clifford_structure(graph)
 
@@ -100,25 +100,40 @@ class TestSampler(ABC):
 
 @dataclass
 class EnumeratedTestSampler(TestSampler):
-    tests: list[Test]
+    tests: Sequence[Test]
 
     @override
     def sample_test(self, rng: Generator | None = None, *, stacklevel: int = 1) -> Test:
         rng = ensure_rng(rng, stacklevel=stacklevel + 1)
-        return self.tests[rng.integers(len(self.tests))]
-
-
-class RandomTestSampler(TestSampler):
-    @override
-    def sample_test_run(self, rng: Generator | None = None, *, stacklevel: int = 1) -> Test:
-        pass
+        return self.tests[int(rng.integers(len(self.tests)))]
 
 
 @dataclass
-class VerificationStrategy[Data](ABC):
+class RandomTestSampler(TestSampler):
+    graph: Graph
+
+    @override
+    def sample_test(self, rng: Generator | None = None, *, stacklevel: int = 1) -> Test:
+        rng = ensure_rng(rng, stacklevel=stacklevel + 1)
+        nodes = self.graph.nodes
+        n = len(nodes)
+        # The probability of needing more than k iterations is 2**(-n * k),
+        # so the probability of iterating multiple times decreases exponentially.
+        while True:
+            bits = rng.integers(0, 2, size=n, dtype=bool)
+            if bits.any():
+                break
+        random_nodes: frozenset[int] = frozenset(node for node, b in zip(nodes, bits, strict=True) if b)
+        traps = frozenset({random_nodes})
+
+        return Test(graph=self.graph, traps=traps, stabilizer=build_stabilizer(traps, self.graph))
+
+
+@dataclass
+class VerificationStrategy[Graph](ABC):
     """Base class for verification strategies."""
 
-    data: Data
+    graph: Graph
 
     @abstractmethod
     def build_sampler(self) -> TestSampler:
@@ -126,7 +141,7 @@ class VerificationStrategy[Data](ABC):
 
 
 @dataclass
-class Dummyless(VerificationStrategy[nx.Graph]):
+class Dummyless(VerificationStrategy[Graph]):
     odd_pair_generator: OddPairGeneratorFn = odd_pair_generators_bfs
 
     @override
@@ -135,55 +150,59 @@ class Dummyless(VerificationStrategy[nx.Graph]):
         stabdict: dict[int, GraphStabilizer] = {
             node: GraphStabilizer(
                 node_indices={node},
-                string=build_stabilizer(traps=frozenset(frozenset({node})), graph=self.data),
+                string=build_stabilizer(traps=frozenset({frozenset({node})}), graph=self.graph),
             )
-            for node in self.data.nodes
+            for node in self.graph.nodes
         }
 
         # Step 2: Rfull = product of all S_v
-        n_qubits = len(self.data.nodes)
+        n_qubits = len(self.graph.nodes)
         identity = GraphStabilizer(node_indices=set(), string=stim.PauliString(n_qubits))
         rfull: GraphStabilizer = reduce(mul, stabdict.values(), identity)
 
         # (removing S_v leaves I at v and flips Z count on its neighbours — stays in I/X/Y)
         # Step 3a: for each even-degree node v, R\v = Rfull * S_v
-        generators: list[GraphStabilizer] = [rfull * stabdict[v] for v, degree in self.data.degree if degree % 2 == 0]
+        generators: list[GraphStabilizer] = [rfull * stabdict[v] for v, degree in self.graph.degree if degree % 2 == 0]
 
         # Step 3b: one R\(u,w) generator per odd-degree node pair
-        generators.extend(self.odd_pair_generator(self.data, stabdict, rfull))
+        generators.extend(self.odd_pair_generator(self.graph, stabdict, rfull))
 
         # Step 4: create tests — each generator's node_indices form one multi-qubit trap
-        tests = [Test(graph=self.data, traps=frozenset(frozenset(gs.node_indices))) for gs in generators]
+        tests: list[Test] = []
+        for gs in generators:
+            traps = frozenset({frozenset(gs.node_indices)})
+            stabilizer = build_stabilizer(traps, self.graph)
+            tests.append(Test(graph=self.graph, traps=traps, stabilizer=stabilizer))
 
         return EnumeratedTestSampler(tests)
 
 
 @dataclass
-class FK12(VerificationStrategy[nx.Graph]):
+class FK12(VerificationStrategy[Graph]):
     manual_coloring: Sequence[set[Node]] | None = None
 
     @override
     def build_sampler(self) -> EnumeratedTestSampler:
-        if self.manual_colouring is None:
-            coloring = nx.coloring.greedy_color(self.data, strategy="largest_first")
+        if self.manual_coloring is None:
+            coloring = nx.coloring.greedy_color(self.graph, strategy="largest_first")
             colors = set(coloring.values())
             nodes_by_color: dict[int, list[int]] = {c: [] for c in colors}
-            for node in sorted(self.data.nodes):
+            for node in sorted(self.graph.nodes):
                 color = coloring[node]
                 nodes_by_color[color].append(node)
         else:
-            # checks that manual_colouring is a proper colouring
+            # checks that manual_coloring is a proper colouring
             ## first check uniion is the whole graph
-            color_union = set().union(*self.manual_colouring)
-            if not color_union == set(self.data.nodes):
+            color_union = set().union(*self.manual_coloring)
+            if not color_union == set(self.graph.nodes):
                 raise ValueError("The provided colouring does not include all the nodes of the graph.")
             # check that colors are two by two disjoint
-            if not disjoint_sets(self.manual_colouring):
+            if not disjoint_sets(self.manual_coloring):
                 raise ValueError(
                     "The provided colouring is not a proper colouring i.e the same node belongs to at least two colours."
                 )
 
-            nodes_by_color = {i: list(c) for i, c in enumerate(self.manual_colouring)}
+            nodes_by_color = {i: list(c) for i, c in enumerate(self.manual_coloring)}
             colors = set(nodes_by_color.keys())
 
         # Create the tests : one per color
@@ -191,16 +210,14 @@ class FK12(VerificationStrategy[nx.Graph]):
         for color in colors:
             # 1 color = 1 test = 1 collection of single-qubit traps
             traps = frozenset(frozenset([colored_node]) for colored_node in nodes_by_color[color])
-            stabilizer = build_stabilizer(traps, self.data)
-            tests.append(Test(graph=self.data, traps=traps, stabilizer=stabilizer))
+            stabilizer = build_stabilizer(traps, self.graph)
+            tests.append(Test(graph=self.graph, traps=traps, stabilizer=stabilizer))
 
         return EnumeratedTestSampler(tests)
 
 
 @dataclass
-class RandomTraps(VerificationStrategy[set[Node]]):
-    rng: Generator | None = None
-
+class RandomTraps(VerificationStrategy[Graph]):
     @override
     def build_sampler(self) -> RandomTestSampler:
-        pass
+        return RandomTestSampler(self.graph)
