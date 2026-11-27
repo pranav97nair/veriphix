@@ -5,15 +5,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+import networkx as nx
 from graphix.fundamentals import IXYZ_VALUES
 from graphix.pauli import Pauli
-from graphix.rng import ensure_rng
 from graphix.simulator import PatternSimulator
-import networkx as nx
 from stim import PauliString
 from typing_extensions import override
-
-from veriphix.protocols import OddPairGeneratorFn, odd_pair_generators_bfs
 
 type Trap = frozenset[int]
 type Traps = frozenset[Trap]
@@ -23,7 +20,6 @@ type Data = nx.Graph | set[Node]
 
 if TYPE_CHECKING:
     from typing import Literal
-    from collections.abc import Sequence
 
     from graphix.measurements import Outcome
     from graphix.noise_models import NoiseModel
