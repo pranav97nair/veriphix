@@ -87,14 +87,6 @@ def remove_flow(pattern: Pattern) -> Pattern:
     return clean_pattern
 
 
-def get_graph_clifford_structure(graph: nx.Graph[int]) -> stim.Tableau:
-    circuit = stim.Circuit()
-    for edge in graph.edges:
-        i, j = edge
-        circuit.append_from_stim_program_text(f"CZ {i} {j}")
-    return circuit.to_tableau()
-
-
 def qCircuit_predicate(output_string: str) -> bool:
     return int(output_string[0]) == 1
 
@@ -540,20 +532,6 @@ class ClientV2:
             node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
             for node, state in states_mapping.items()
         }
-
-
-# [MUN] TODO: Check if we can use Graphix PauliString to drop stim dep.
-# TODO: Instead of "Literal"
-def build_stabilizer(test: Test, clifford_structure: Tableau, measurement_basis: Pauli) -> PauliString:
-    nqubits = len(clifford_structure)
-    # Build the PauliStrings representing the individual measurement of each trap qubit
-    measurement_strings = [
-        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in test
-    ]
-    # Conjugate each measurement
-    conjugated_measurements = [clifford_structure.inverse()(meas) for meas in measurement_strings]
-    common_stabilizer = merge(conjugated_measurements)
-    return common_stabilizer
 
 
 @dataclass

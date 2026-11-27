@@ -4,8 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from graphix.fundamentals import IXYZ_VALUES
-from graphix.pauli import Pauli
+from graphix.fundamentals import Axis
 from graphix.rng import ensure_rng
 from graphix.simulator import PatternSimulator
 import networkx as nx
@@ -18,9 +17,147 @@ type Trap = frozenset[int]
 type Node = int
 type Data = nx.Graph | set[Node]
 
+if TYPE_CHECKING:
+    from typing import Literal
+    from collections.abc import Sequence
+
+    from graphix.measurements import Outcome
+    from graphix.noise_models import NoiseModel
+    from graphix.sim.base_backend import Backend
+    from graphix.states import PlanarState
+    from numpy.random import Generator
+
+    from veriphix.client import Client
+
 
 @dataclass
 class Test():
-    graph: nx.Graph
+    graph: nx.Graph[int]
     traps: frozenset[Trap]
     stabilizer: PauliString
+
+
+def get_graph_clifford_structure(graph: nx.Graph[int]) -> stim.Tableau:
+    circuit = stim.Circuit()
+    for edge in graph.edges:
+        i, j = edge
+        circuit.append_from_stim_program_text(f"CZ {i} {j}")
+    return circuit.to_tableau()
+
+
+# [MUN] TODO: Check if we can use Graphix PauliString to drop stim dep.
+# [PGN] TODO: Fix issue with passing str(Axis) to PauliString
+def build_stabilizer(traps: frozenset[Trap], graph: nx.Graph[int], measurement_basis: Axis = Axis.X) -> PauliString:
+    nqubits = len(test.graph)
+    clifford_structure = get_graph_clifford_structure(graph)
+
+    # Build the PauliStrings representing the individual measurement of each trap qubit
+    measurement_strings = [
+        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in test.traps
+    ]
+
+    # Conjugate each measurement
+    conjugated_measurements = [clifford_structure.inverse()(meas) for meas in measurement_strings]
+    common_stabilizer = merge(conjugated_measurements)
+    return common_stabilizer
+
+
+class TestSampler(ABC):
+    """Base class for test samplers."""
+
+    @abstractmethod
+    def sample_test(self, rng: Generator | None = None) -> Test:
+        pass
+
+
+@dataclass
+class EnumeratedTestSampler(TestSampler):
+    tests: list[Test]
+
+    @override
+    def sample_test(self, rng: Generator | None = None) -> Test:
+        rng = ensure_rng(rng)
+        return self.tests[rng.integers(len(self.tests))]
+
+
+class RandomTestSampler(TestSampler):
+    @override
+    def sample_test_run(self) -> Test:
+        pass
+
+
+@dataclass
+class VerificationStrategy[Data](ABC):
+    """Base class for verification strategies."""
+
+    data: Data
+
+    @abstractmethod
+    def build_sampler(self) -> TestSampler:
+        pass
+
+
+@dataclass
+class Dummyless(VerificationStrategy[nx.Graph]):
+    odd_pair_generator: OddPairGeneratorFn = odd_pair_generators_bfs
+
+    @override
+    def build_sampler(self) -> EnumeratedTestSampler:
+        pass
+
+
+@dataclass
+class FK12(VerificationStrategy[nx.Graph]):
+    manual_coloring: Sequence[set[Node]] | None = None
+
+    @override
+    def build_sampler(self) -> EnumeratedTestSampler:
+        if self.manual_colouring is None:
+            coloring = nx.coloring.greedy_color(self.data, strategy="largest_first")
+            colors = set(coloring.values())
+            nodes_by_color: dict[int, list[int]] = {c: [] for c in colors}
+            for node in sorted(self.data.nodes):
+                color = coloring[node]
+                nodes_by_color[color].append(node)
+        else:
+            # checks that manual_colouring is a proper colouring
+            ## first check uniion is the whole graph
+            color_union = set().union(*self.manual_colouring)
+            if not color_union == set(self.data.nodes):
+                raise ValueError("The provided colouring does not include all the nodes of the graph.")
+            # check that colors are two by two disjoint
+            if not disjoint_sets(self.manual_colouring):
+                raise ValueError(
+                    "The provided colouring is not a proper colouring i.e the same node belongs to at least two colours."
+                )
+
+            nodes_by_color = {i: list(c) for i, c in enumerate(self.manual_colouring)}
+            colors = set(nodes_by_color.keys())
+
+        # Create the tests : one per color
+        tests: list[Test] = [
+            # 1 color = 1 test = 1 collection of single-qubit traps
+            frozenset([frozenset([node]) for node in nodes_by_color[color]])
+            for color in colors
+        ]
+
+        tests: list[Test] = []
+        for color in colors:
+            # 1 color = 1 test = 1 collection of single-qubit traps
+            traps = frozenset(
+                frozenset([colored_node])
+                for colored_node in nodes_by_color[color]
+            )
+            stabilizer = build_stabilizer(traps, self.graph)
+            tests.append(Test(graph, traps, stabilizer))
+
+        return EnumeratedTestSampler(tests)
+
+
+@dataclass
+class RandomTraps(VerificationStrategy[set[Node]]):
+    rng: Generator | None = None
+
+    @override
+    def build_sampler(self) -> RandomTestSampler:
+        pass
