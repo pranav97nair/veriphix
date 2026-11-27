@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from graphix.clifford import Clifford
+from graphix.fundamentals import Sign
 from graphix.measurements import BlochMeasurement, toggle_outcome
 from graphix.simulator import MeasureMethod
 from typing_extensions import override
@@ -14,21 +15,18 @@ if TYPE_CHECKING:
     from graphix.measurements import Outcome
     from verifying.client import PrivateData
 
-    from veriphix.blinding import SecretDatas
+    from veriphix.blind import SecretsV2
 
 
 @dataclass
 class DelegateMeasureMethod(MeasureMethod):
-    secret_data: SecretDatas
+    secrets: SecretsV2
     private: PrivateData
     results: dict[int, Outcome] = dataclasses.field(default_factory=dict)
 
     @override
     def describe_measurement(self, cmd: BaseM) -> BlochMeasurement:
         parameters = self.private.measurements[cmd.node]
-
-        # Extract secrets
-        a_value = self.secret_data.a.a.get(cmd.node, 0)
 
         # Extract signals and compute the angle for the computation
         s_signal = sum(self.results[j] for j in parameters.s_domain) % 2
@@ -43,7 +41,8 @@ class DelegateMeasureMethod(MeasureMethod):
         # Compensate the blinding inside the measurement angle: the `a` encryption
         # flips the angle sign (it commutes the X Pauli through the measurement)
         # and the `theta` encryption is added back via `blind_angle`.
-        angle = (-1) ** a_value * bloch.angle + self.secret_data.blind_angle(cmd.node)
+        phase = Sign.minus_if(bool(secrets.a(cmd.node)))
+        angle = phase * bloch.angle + self.secrets.blind_angle(cmd.node)
         return BlochMeasurement(angle, bloch.plane)
 
     @override
@@ -56,7 +55,7 @@ class DelegateMeasureMethod(MeasureMethod):
         # decrypts it with `xor r xor a_N` before storing it. `r` is the
         # one-time-pad applied to every node and `a_N` is the X encryption
         # propagated from the neighbours' `a` secrets.
-        flip_value = self.secret_data.r.get(node, 0) ^ self.secret_data.a.a_N.get(node, 0)
+        flip_value = self.secrets.r(node) ^ self.secrets.a_neigh(node)
         if flip_value:
             result = toggle_outcome(result)
         self.results[node] = result

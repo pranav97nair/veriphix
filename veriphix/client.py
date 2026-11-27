@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from math import ceil
 from typing import TYPE_CHECKING, assert_never, cast
@@ -18,11 +19,14 @@ from graphix.states import BasicStates, State
 from stim import PauliString
 from typing_extensions import override
 
+from veriphix.blind import SecretFlags
+from veriphix.blind import Secrets as SecretsV2
 from veriphix.blinding import SecretDatas, Secrets
 from veriphix.malicious_noise_model import MaliciousNoiseModel
 from veriphix.measure import DelegateMeasureMethod
 from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
 from veriphix.protocols import FK12, Round, VerificationProtocol
+from veriphix.strategies import get_graph_clifford_structure
 from veriphix.verifying import ComputationRun, ResultAnalysis, Run, RunResult, TrappifiedSchemeParameters
 
 if TYPE_CHECKING:
@@ -423,9 +427,9 @@ type Test = frozenset[frozenset[int]]
 type RunOrTestRun = Runnable | tuple[Runnable, Test]
 
 
+@dataclass(frozen=True)
 class ClientV2:
-    def __init__(self, secrets: Secrets | None = None) -> None:
-        self.secrets: Secrets = secrets or Secrets()
+    secret_flags: SecretFlags = dataclasses.field(default_factory=SecretFlags)
 
     def build_run(
         self,
@@ -435,16 +439,9 @@ class ClientV2:
         *,
         stacklevel: int = 1,
     ) -> Runnable:
-        rng = ensure_rng(rng, stacklevel=stacklevel + 1)
-        # [MUN] Secrets should be refactored
-        secret_data = SecretDatas.from_secrets(
-            self.secrets,
-            # [MUN] We are standardizing every time we generate a run, we should store the graph somewhere
-            clean_pattern.public.to_opengraph().graph,
-            set(clean_pattern.public.input_nodes),
-            set(clean_pattern.public.output_nodes),
-            rng=rng,
-        )
+        # [MUN] We are standardizing every time we generate a run, we should store the open graph in clean_pattern
+        secrets = SecretsV2(clean_pattern.public.to_opengraph(), self.secret_flags, rng=rng, stacklevel=stacklevel + 1)
+
         # [MUN] The two commented lines below are pseudocode from meeting with Sami:
         # #decoding_keys = Blindness.propagate(secrets.a, secrets.r, public.graph) # -> r'(i) = r(i) ^ a_N(i)
         # #measure_method = MeasureMethod(private, secrets.a, secrets.theta, decoding_keys)
@@ -452,10 +449,10 @@ class ClientV2:
         # Eventually, we'll refactor that, so that all the r' keys are precomputed and passed to DelegateMeasureMethod
 
         # [MUN] Since we pass the "measure_method" to the backend, won't the server have access to the private data then?
-        measure_method = DelegateMeasureMethod(secret_data, clean_pattern.private)
+        measure_method = DelegateMeasureMethod(secrets, clean_pattern.private)
 
         # states_mapping maps a blinded state to ALL nodes, inputs and ancillas
-        preparation_bank = self.blind_states(secret_data, states_mapping)
+        preparation_bank = self.blind_states(secrets, states_mapping)
         prepare_method = ClientPrepareMethodV2(preparation_bank)
 
         # At this stage, input nodes have not been addded the backend, but the prepare method has the capability to do so.
@@ -466,7 +463,7 @@ class ClientV2:
     def stream_runs(
         self,
         clean_pattern: CleanPattern,
-        input_state: Sequence[BasicStates],
+        input_state: Sequence[PlanarState],
         protocol: VerificationProtocol,
         rng: Generator | None = None,
         *,
@@ -500,7 +497,7 @@ class ClientV2:
                     assert_never(r)
 
     @staticmethod
-    def generate_computation_states(public: Pattern, input_state: Sequence[BasicStates]) -> dict[Node, BasicStates]:
+    def generate_computation_states(public: Pattern, input_state: Sequence[PlanarState]) -> dict[Node, PlanarState]:
         """Return the (unblinded) state in which each node is prepared.
 
         These states do not depend on the secrets: input nodes are prepared in
@@ -522,13 +519,13 @@ class ClientV2:
     def generate_test_states(nodes: AbstractSet[int], stabilizer: PauliString) -> dict[Node, PlanarState]:
         return dict(zip(nodes, (Pauli(IXYZ_VALUES[pauli]).eigenstate() for pauli in stabilizer), strict=True))  # type: ignore[attr-defined]
 
-    def blind_states(self, secret_data: SecretDatas, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
+    def blind_states(self, secrets: SecretsV2, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
         """
         The Client creates the qubits and blind them in its preparation_bank
         """
         # Should we have "blind_state" instead of "blind_qubit" ?
         return {
-            node: Statevector(secret_data.blind_qubit(node=node, state=state)) for node, state in states_mapping.items()
+            node: Statevector(secrets.blind_qubit(node=node, state=state)) for node, state in states_mapping.items()
         }
 
 
