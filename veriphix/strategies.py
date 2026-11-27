@@ -135,12 +135,6 @@ class FK12(VerificationStrategy[nx.Graph]):
             colors = set(nodes_by_color.keys())
 
         # Create the tests : one per color
-        tests: list[Test] = [
-            # 1 color = 1 test = 1 collection of single-qubit traps
-            frozenset([frozenset([node]) for node in nodes_by_color[color]])
-            for color in colors
-        ]
-
         tests: list[Test] = []
         for color in colors:
             # 1 color = 1 test = 1 collection of single-qubit traps
@@ -148,8 +142,8 @@ class FK12(VerificationStrategy[nx.Graph]):
                 frozenset([colored_node])
                 for colored_node in nodes_by_color[color]
             )
-            stabilizer = build_stabilizer(traps, self.graph)
-            tests.append(Test(graph, traps, stabilizer))
+            stabilizer = build_stabilizer(traps, self.data)
+            tests.append(Test(self.data, traps, stabilizer))
 
         return EnumeratedTestSampler(tests)
 
