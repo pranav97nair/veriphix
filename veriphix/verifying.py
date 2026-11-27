@@ -92,6 +92,7 @@ def merge_pauli_strings(stabilizer_1: PauliString, stabilizer_2: PauliString) ->
     return result
 
 
+# TODO move to client.py
 def merge(strings: list[PauliString]) -> PauliString:
     n = len(strings)
     l = len(strings[0])

@@ -2,33 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, assert_never, cast
 
 import stim
 from graphix import Plane
 from graphix.clifford import Clifford
 from graphix.command import BaseCommand, BaseM, BaseN, Command, CommandKind
+from graphix.fundamentals import IXYZ_VALUES
 from graphix.measurements import BlochMeasurement, Measurement, toggle_outcome
 from graphix.pattern import Pattern
+from graphix.pauli import Pauli
 from graphix.rng import ensure_rng
 from graphix.sim.statevec import Statevector
 from graphix.simulator import MeasureMethod, PrepareMethod
 from graphix.states import BasicStates, State
+from stim import PauliString, Tableau
 from typing_extensions import override
 
 from veriphix.blinding import SecretDatas, Secrets
 from veriphix.malicious_noise_model import MaliciousNoiseModel
-from veriphix.protocols import FK12, VerificationProtocol
-from veriphix.verifying import (
-    ComputationRun,
-    ResultAnalysis,
-    Run,
-    RunResult,
-    TrappifiedSchemeParameters,
-)
+from veriphix.measure import DelegateMeasureMethod
+from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
+from veriphix.protocols import FK12, Round, VerificationProtocol
+from veriphix.verifying import ComputationRun, ResultAnalysis, Run, RunResult, TrappifiedSchemeParameters, merge
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from typing import TypeVar
 
     import networkx as nx
@@ -36,9 +36,11 @@ if TYPE_CHECKING:
     from graphix.measurements import Outcome
     from graphix.noise_models import NoiseModel
     from graphix.sim.base_backend import Backend
+    from graphix.states import PlanarState
     from numpy.random import Generator
 
     _StateT = TypeVar("_StateT")
+    type Node = int
     type MeasuredNode = int
     type OutputNode = int
     type Domain = frozenset[MeasuredNode]
@@ -404,6 +406,154 @@ class TestMeasureMethod(BlindMeasureMethod):
         angle = self._client.secret_datas.blind_angle(cmd.node)
 
         return Measurement.XY(angle)
+
+
+@dataclass
+class DelegationRounds:
+    n_compute: int
+    n_test: int
+
+
+@dataclass
+class DelegationParameters[Data]:
+    rounds: DelegationRounds
+    strategy: ...  # VerificationStrategy[Data] # or DelegationStrategy?
+
+
+@dataclass
+class Runnable:  # tobe renamed Run
+    public: Pattern
+    measure_method: MeasureMethod
+    prepare_method: PrepareMethod
+
+
+type Test = frozenset[frozenset[int]]
+
+type RunOrTestRun = Runnable | tuple[Runnable, Test]
+
+
+class ClientV2:
+    def __init__(self, secrets: Secrets | None = None) -> None:
+        self.secrets: Secrets = secrets or Secrets()
+
+    def build_run(
+        self,
+        clean_pattern: CleanPattern,
+        states_mapping: Mapping[Node, State],
+        rng: Generator | None = None,
+        *,
+        stacklevel: int = 1,
+    ) -> Runnable:
+        rng = ensure_rng(rng, stacklevel=stacklevel + 1)
+        # Secrets should be refactored
+        secret_data = SecretDatas.from_secrets(
+            self.secrets,
+            # We are standardizing every time we generate a run, we should store the graph somewhere
+            clean_pattern.public.to_opengraph().graph,
+            set(clean_pattern.public.input_nodes),
+            set(clean_pattern.public.output_nodes),
+            rng=rng,
+        )
+        # [MUN] The two commented lines below are pseudocode from meeting with Sami:
+        # #decoding_keys = Blindness.propagate(secrets.a, secrets.r, public.graph) # -> r'(i) = r(i) ^ a_N(i)
+        # #measure_method = MeasureMethod(private, secrets.a, secrets.theta, decoding_keys)
+        # I believe that "Blindness.propagate" is currently done by DelegateMeasureMethod.store_measurement_outcome.
+        # Eventually, we'll refactor that, so that all the r' keys are precomputed and passed to DelegateMeasureMethod
+
+        # [MUN] Since we pass the "measure_method" to the backend, won't the server have access to the private data then?
+        measure_method = DelegateMeasureMethod(secret_data, clean_pattern.private)
+
+        # states_mapping maps a blinded state to ALL nodes, inputs and ancillas
+        preparation_bank = self.blind_states(states_mapping)
+        prepare_method = ClientPrepareMethodV2(preparation_bank)
+
+        # At this stage, input nodes have not been addded the backend, but the prepare method has the capability to do so.
+        # This is the responsability of the method who runs the protocol
+
+        return Runnable(clean_pattern.public, measure_method, prepare_method)
+
+    def stream_runs(
+        self,
+        clean_pattern: CleanPattern,
+        input_state: Sequence[BasicStates],
+        protocol: VerificationProtocol,
+        measurement_basis: Pauli = Pauli.X,
+        rng: Generator | None = None,
+        *,
+        stacklevel: int = 1,
+    ) -> Iterator[RunOrTestRun]:
+        # Add support for input_state = None
+
+        computation_states_mapping = ClientV2.generate_computation_states(clean_pattern.public, input_state)
+        graph_clifford_structure = get_graph_clifford_structure(clean_pattern.public.to_opengraph().graph)
+        nodes = clean_pattern.public.nodes()
+
+        # [MUN]
+        # This was in Sami's notes. What is it for??
+        #
+        # test_private_data={
+        # i: (0, [], [])
+        # for i in public.nodes
+        # }
+
+        for r in protocol.rounds():  # shuffle(['c']*protocol.n_comp_rounds + ['t']*protocol.n_test_rounds)
+            match r:
+                case Round.Computation:
+                    yield self.build_run(clean_pattern, computation_states_mapping, rng, stacklevel=stacklevel + 1)
+                case Round.Test:
+                    test = protocol.strategy.sample_test()
+                    stabilizer = build_stabilizer(test, graph_clifford_structure, measurement_basis)
+                    test_states_mapping = ClientV2.generate_test_states(nodes, stabilizer)  # Unblinded states
+                    yield test, self.build_run(clean_pattern, test_states_mapping, rng, stacklevel=stacklevel + 1)
+                case _:
+                    assert_never(r)
+
+    @staticmethod
+    def generate_computation_states(public: Pattern, input_state: Sequence[BasicStates]) -> dict[Node, BasicStates]:
+        """Return the (unblinded) state in which each node is prepared.
+
+        These states do not depend on the secrets: input nodes are prepared in
+        the specific input state desired by the Client, and every other node is
+        prepared in ``|+>`` by default. Because they are secret-independent, the
+        computation states never need to be refreshed; the secret-dependent
+        blinding is applied separately at the blindness level (see
+        :meth:`SecretDatas.blind_qubit`).
+        """
+        states_mapping = dict(zip(public.input_nodes, input_state, strict=True))
+        states_mapping.update((node, BasicStates.PLUS) for node in public.nodes if node not in states_mapping)
+
+        return states_mapping
+
+    # [MUN]
+    # This implementation doesn't require graph nodes to be indexed from 0 to n-1 qubits
+    # Code in TestRun.delegate assumed so
+    @staticmethod
+    def generate_test_states(nodes: AbstractSet[int], stabilizer: PauliString) -> dict[Node, PlanarState]:
+        return dict(zip(nodes, (Pauli(IXYZ_VALUES[pauli]).eigenstate() for pauli in stabilizer), strict=True))
+
+    def blind_states(self, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
+        """
+        The Client creates the qubits and blind them in its preparation_bank
+        """
+        # Should we have "blind_state" instead of "blind_qubit" ?
+        return {
+            node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
+            for node, state in states_mapping.items()
+        }
+
+
+# [MUN] TODO: Check if we can use Graphix PauliString to drop stim dep.
+# TODO: Instead of "Literal"
+def build_stabilizer(test: Test, clifford_structure: Tableau, measurement_basis: Pauli) -> PauliString:
+    nqubits = len(clifford_structure)
+    # Build the PauliStrings representing the individual measurement of each trap qubit
+    measurement_strings = [
+        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in test
+    ]
+    # Conjugate each measurement
+    conjugated_measurements = [clifford_structure.inverse()(meas) for meas in measurement_strings]
+    common_stabilizer = merge(conjugated_measurements)
+    return common_stabilizer
 
 
 @dataclass
