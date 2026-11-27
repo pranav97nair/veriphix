@@ -8,12 +8,15 @@ import stim
 from graphix import Plane
 from graphix.clifford import Clifford
 from graphix.command import BaseCommand, BaseM, BaseN, Command, CommandKind
+from graphix.fundamentals import IXYZ_VALUES
 from graphix.measurements import BlochMeasurement, Measurement, toggle_outcome
 from graphix.pattern import Pattern
+from graphix.pauli import Pauli
 from graphix.rng import ensure_rng
 from graphix.sim.statevec import Statevector
 from graphix.simulator import MeasureMethod, PrepareMethod
 from graphix.states import BasicStates, State
+from stim import PauliString, Tableau
 from typing_extensions import override
 
 from veriphix.blinding import SecretDatas, Secrets
@@ -21,16 +24,11 @@ from veriphix.malicious_noise_model import MaliciousNoiseModel
 from veriphix.measure import DelegateMeasureMethod
 from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
 from veriphix.protocols import FK12, Round, VerificationProtocol
-from veriphix.verifying import (
-    ComputationRun,
-    ResultAnalysis,
-    Run,
-    RunResult,
-    TrappifiedSchemeParameters,
-)
+from veriphix.verifying import ComputationRun, ResultAnalysis, Run, RunResult, TrappifiedSchemeParameters, merge
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from typing import TypeVar
 
     import networkx as nx
@@ -38,6 +36,7 @@ if TYPE_CHECKING:
     from graphix.measurements import Outcome
     from graphix.noise_models import NoiseModel
     from graphix.sim.base_backend import Backend
+    from graphix.states import PlanarState
     from numpy.random import Generator
 
     _StateT = TypeVar("_StateT")
@@ -428,7 +427,7 @@ class Runnable:  # tobe renamed Run
     prepare_method: PrepareMethod
 
 
-type Test = frozenset[frozenset[int]]  ### to be defiend as a proper dataclass
+type Test = frozenset[frozenset[int]]
 
 type RunOrTestRun = Runnable | tuple[Runnable, Test]
 
@@ -478,6 +477,7 @@ class ClientV2:
         clean_pattern: CleanPattern,
         input_state: Sequence[BasicStates],
         protocol: VerificationProtocol,
+        measurement_basis: Pauli = Pauli.X,
         rng: Generator | None = None,
         *,
         stacklevel: int = 1,
@@ -485,8 +485,8 @@ class ClientV2:
         # Add support for input_state = None
 
         computation_states_mapping = ClientV2.generate_computation_states(clean_pattern.public, input_state)
-
         graph_clifford_structure = get_graph_clifford_structure(clean_pattern.public.to_opengraph().graph)
+        nodes = clean_pattern.public.nodes()
 
         # [MUN]
         # This was in Sami's notes. What is it for??
@@ -501,12 +501,9 @@ class ClientV2:
                 case Round.Computation:
                     yield self.build_run(clean_pattern, computation_states_mapping, rng, stacklevel=stacklevel + 1)
                 case Round.Test:
-                    test = protocol.strategy.sample_test()  # returns a Test
-                    test_states_mapping = test.generate_state_mapping(
-                        graph_clifford_structure, input_state
-                    )  # It may need info about the patterns nodes, and the input nodes.
-                    # test_states_mapping is a dict[Node, State], for all the nodes in the graph. Unblinded states
-
+                    test = protocol.strategy.sample_test()
+                    stabilizer = build_stabilizer(test, graph_clifford_structure, measurement_basis)
+                    test_states_mapping = ClientV2.generate_test_states(nodes, stabilizer)  # Unblinded states
                     yield test, self.build_run(clean_pattern, test_states_mapping, rng, stacklevel=stacklevel + 1)
                 case _:
                     assert_never(r)
@@ -527,6 +524,13 @@ class ClientV2:
 
         return states_mapping
 
+    # [MUN]
+    # This implementation doesn't require graph nodes to be indexed from 0 to n-1 qubits
+    # Code in TestRun.delegate assumed so
+    @staticmethod
+    def generate_test_states(nodes: AbstractSet[int], stabilizer: PauliString) -> dict[Node, PlanarState]:
+        return dict(zip(nodes, (Pauli(IXYZ_VALUES[pauli]).eigenstate() for pauli in stabilizer), strict=True))
+
     def blind_states(self, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
         """
         The Client creates the qubits and blind them in its preparation_bank
@@ -536,6 +540,20 @@ class ClientV2:
             node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
             for node, state in states_mapping.items()
         }
+
+
+# [MUN] TODO: Check if we can use Graphix PauliString to drop stim dep.
+# TODO: Instead of "Literal"
+def build_stabilizer(test: Test, clifford_structure: Tableau, measurement_basis: Pauli) -> PauliString:
+    nqubits = len(clifford_structure)
+    # Build the PauliStrings representing the individual measurement of each trap qubit
+    measurement_strings = [
+        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in test
+    ]
+    # Conjugate each measurement
+    conjugated_measurements = [clifford_structure.inverse()(meas) for meas in measurement_strings]
+    common_stabilizer = merge(conjugated_measurements)
+    return common_stabilizer
 
 
 @dataclass

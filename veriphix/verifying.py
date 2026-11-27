@@ -86,6 +86,7 @@ def merge_pauli_strings(stabilizer_1: PauliString, stabilizer_2: PauliString) ->
     return result
 
 
+# TODO move to client.py
 def merge(strings: list[PauliString]) -> PauliString:
     n = len(strings)
     l = len(strings[0])
@@ -98,10 +99,6 @@ def merge(strings: list[PauliString]) -> PauliString:
             if common_string[j] == 0 and strings[i][j] != 0:
                 common_string[j] = strings[i][j]
     return common_string
-
-
-# This should be methods of `Test`
-# All the stabilizer building workflow should be encapsaulated in a single method `Test.generate_test_state_mapping -> Mapping[Node, PlanarState]` which is called by Client.
 
 
 def generate_eigenstate(stabilizer: PauliString) -> list[PlanarState]:

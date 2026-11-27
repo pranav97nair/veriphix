@@ -28,7 +28,7 @@ class DelegateMeasureMethod(MeasureMethod):
         parameters = self.private.measurements[cmd.node]
 
         # Extract secrets
-        a_value = self.secret_datas.a.a.get(cmd.node, 0)
+        a_value = self.secret_data.a.a.get(cmd.node, 0)
 
         # Extract signals and compute the angle for the computation
         s_signal = sum(self.results[j] for j in parameters.s_domain) % 2
@@ -43,7 +43,7 @@ class DelegateMeasureMethod(MeasureMethod):
         # Compensate the blinding inside the measurement angle: the `a` encryption
         # flips the angle sign (it commutes the X Pauli through the measurement)
         # and the `theta` encryption is added back via `blind_angle`.
-        angle = (-1) ** a_value * bloch.angle + self.secret_datas.blind_angle(cmd.node)
+        angle = (-1) ** a_value * bloch.angle + self.secret_data.blind_angle(cmd.node)
         return BlochMeasurement(angle, bloch.plane)
 
     @override
