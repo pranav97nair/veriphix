@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from math import ceil
 from typing import TYPE_CHECKING, assert_never, cast
 
-import stim
 from graphix import Plane
 from graphix.clifford import Clifford
 from graphix.command import BaseCommand, BaseM, BaseN, Command, CommandKind
@@ -16,7 +15,7 @@ from graphix.rng import ensure_rng
 from graphix.sim.statevec import Statevector
 from graphix.simulator import MeasureMethod, PrepareMethod
 from graphix.states import BasicStates, State
-from stim import PauliString, Tableau
+from stim import PauliString
 from typing_extensions import override
 
 from veriphix.blinding import SecretDatas, Secrets
@@ -24,14 +23,13 @@ from veriphix.malicious_noise_model import MaliciousNoiseModel
 from veriphix.measure import DelegateMeasureMethod
 from veriphix.prepare import ClientPrepareMethod as ClientPrepareMethodV2
 from veriphix.protocols import FK12, Round, VerificationProtocol
-from veriphix.verifying import ComputationRun, ResultAnalysis, Run, RunResult, TrappifiedSchemeParameters, merge
+from veriphix.verifying import ComputationRun, ResultAnalysis, Run, RunResult, TrappifiedSchemeParameters
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from typing import TypeVar
 
-    import networkx as nx
     from graphix.command import CommandType
     from graphix.measurements import Outcome
     from graphix.noise_models import NoiseModel
@@ -41,6 +39,7 @@ if TYPE_CHECKING:
 
     _StateT = TypeVar("_StateT")
     type Node = int
+    type InputNode = int
     type MeasuredNode = int
     type OutputNode = int
     type Domain = frozenset[MeasuredNode]
@@ -437,10 +436,10 @@ class ClientV2:
         stacklevel: int = 1,
     ) -> Runnable:
         rng = ensure_rng(rng, stacklevel=stacklevel + 1)
-        # Secrets should be refactored
+        # [MUN] Secrets should be refactored
         secret_data = SecretDatas.from_secrets(
             self.secrets,
-            # We are standardizing every time we generate a run, we should store the graph somewhere
+            # [MUN] We are standardizing every time we generate a run, we should store the graph somewhere
             clean_pattern.public.to_opengraph().graph,
             set(clean_pattern.public.input_nodes),
             set(clean_pattern.public.output_nodes),
@@ -456,7 +455,7 @@ class ClientV2:
         measure_method = DelegateMeasureMethod(secret_data, clean_pattern.private)
 
         # states_mapping maps a blinded state to ALL nodes, inputs and ancillas
-        preparation_bank = self.blind_states(states_mapping)
+        preparation_bank = self.blind_states(secret_data, states_mapping)
         prepare_method = ClientPrepareMethodV2(preparation_bank)
 
         # At this stage, input nodes have not been addded the backend, but the prepare method has the capability to do so.
@@ -469,7 +468,6 @@ class ClientV2:
         clean_pattern: CleanPattern,
         input_state: Sequence[BasicStates],
         protocol: VerificationProtocol,
-        measurement_basis: Pauli = Pauli.X,
         rng: Generator | None = None,
         *,
         stacklevel: int = 1,
@@ -477,7 +475,6 @@ class ClientV2:
         # Add support for input_state = None
 
         computation_states_mapping = ClientV2.generate_computation_states(clean_pattern.public, input_state)
-        graph_clifford_structure = get_graph_clifford_structure(clean_pattern.public.to_opengraph().graph)
         nodes = clean_pattern.public.nodes()
 
         # [MUN]
@@ -487,15 +484,17 @@ class ClientV2:
         # i: (0, [], [])
         # for i in public.nodes
         # }
+        sampler = protocol.strategy.build_sampler()
 
-        for r in protocol.rounds():  # shuffle(['c']*protocol.n_comp_rounds + ['t']*protocol.n_test_rounds)
+        for r in protocol.rounds(
+            rng, stacklevel=stacklevel + 1
+        ):  # shuffle(['c']*protocol.n_comp_rounds + ['t']*protocol.n_test_rounds)
             match r:
                 case Round.Computation:
                     yield self.build_run(clean_pattern, computation_states_mapping, rng, stacklevel=stacklevel + 1)
                 case Round.Test:
-                    test = protocol.strategy.sample_test()
-                    stabilizer = build_stabilizer(test, graph_clifford_structure, measurement_basis)
-                    test_states_mapping = ClientV2.generate_test_states(nodes, stabilizer)  # Unblinded states
+                    test = sampler.sample_test(rng, stacklevel=stacklevel + 1)
+                    test_states_mapping = ClientV2.generate_test_states(nodes, test.stabilizer)  # Unblinded states
                     yield test, self.build_run(clean_pattern, test_states_mapping, rng, stacklevel=stacklevel + 1)
                 case _:
                     assert_never(r)
@@ -512,7 +511,7 @@ class ClientV2:
         :meth:`SecretDatas.blind_qubit`).
         """
         states_mapping = dict(zip(public.input_nodes, input_state, strict=True))
-        states_mapping.update((node, BasicStates.PLUS) for node in public.nodes if node not in states_mapping)
+        states_mapping.update((node, BasicStates.PLUS) for node in public.nodes() if node not in states_mapping)
 
         return states_mapping
 
@@ -521,16 +520,15 @@ class ClientV2:
     # Code in TestRun.delegate assumed so
     @staticmethod
     def generate_test_states(nodes: AbstractSet[int], stabilizer: PauliString) -> dict[Node, PlanarState]:
-        return dict(zip(nodes, (Pauli(IXYZ_VALUES[pauli]).eigenstate() for pauli in stabilizer), strict=True))
+        return dict(zip(nodes, (Pauli(IXYZ_VALUES[pauli]).eigenstate() for pauli in stabilizer), strict=True))  # type: ignore[attr-defined]
 
-    def blind_states(self, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
+    def blind_states(self, secret_data: SecretDatas, states_mapping: Mapping[Node, State]) -> dict[Node, Statevector]:
         """
         The Client creates the qubits and blind them in its preparation_bank
         """
         # Should we have "blind_state" instead of "blind_qubit" ?
         return {
-            node: Statevector(self.secret_datas.blind_qubit(node=node, state=state))
-            for node, state in states_mapping.items()
+            node: Statevector(secret_data.blind_qubit(node=node, state=state)) for node, state in states_mapping.items()
         }
 
 

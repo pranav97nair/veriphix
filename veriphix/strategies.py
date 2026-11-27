@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+import networkx as nx
+import stim
 from graphix.fundamentals import Axis
 from graphix.rng import ensure_rng
-from graphix.simulator import PatternSimulator
-import networkx as nx
 from stim import PauliString
 from typing_extensions import override
 
@@ -18,20 +18,13 @@ type Node = int
 type Data = nx.Graph | set[Node]
 
 if TYPE_CHECKING:
-    from typing import Literal
     from collections.abc import Sequence
 
-    from graphix.measurements import Outcome
-    from graphix.noise_models import NoiseModel
-    from graphix.sim.base_backend import Backend
-    from graphix.states import PlanarState
     from numpy.random import Generator
-
-    from veriphix.client import Client
 
 
 @dataclass
-class Test():
+class Test:
     graph: nx.Graph[int]
     traps: frozenset[Trap]
     stabilizer: PauliString
@@ -53,20 +46,19 @@ def build_stabilizer(traps: frozenset[Trap], graph: nx.Graph[int], measurement_b
 
     # Build the PauliStrings representing the individual measurement of each trap qubit
     measurement_strings = [
-        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in test.traps
+        PauliString([str(measurement_basis) if i in trap else "I" for i in range(nqubits)]) for trap in traps
     ]
 
     # Conjugate each measurement
     conjugated_measurements = [clifford_structure.inverse()(meas) for meas in measurement_strings]
-    common_stabilizer = merge(conjugated_measurements)
-    return common_stabilizer
+    return merge(conjugated_measurements)
 
 
 class TestSampler(ABC):
     """Base class for test samplers."""
 
     @abstractmethod
-    def sample_test(self, rng: Generator | None = None) -> Test:
+    def sample_test(self, rng: Generator | None = None, *, stacklevel: int = 1) -> Test:
         pass
 
 
@@ -75,8 +67,8 @@ class EnumeratedTestSampler(TestSampler):
     tests: list[Test]
 
     @override
-    def sample_test(self, rng: Generator | None = None) -> Test:
-        rng = ensure_rng(rng)
+    def sample_test(self, rng: Generator | None = None, *, stacklevel: int = 1) -> Test:
+        rng = ensure_rng(rng, stacklevel=stacklevel + 1)
         return self.tests[rng.integers(len(self.tests))]
 
 
@@ -138,10 +130,7 @@ class FK12(VerificationStrategy[nx.Graph]):
         tests: list[Test] = []
         for color in colors:
             # 1 color = 1 test = 1 collection of single-qubit traps
-            traps = frozenset(
-                frozenset([colored_node])
-                for colored_node in nodes_by_color[color]
-            )
+            traps = frozenset(frozenset([colored_node]) for colored_node in nodes_by_color[color])
             stabilizer = build_stabilizer(traps, self.data)
             tests.append(Test(self.data, traps, stabilizer))
 
