@@ -11,7 +11,7 @@ import networkx as nx
 from stim import PauliString
 from typing_extensions import override
 
-from veriphix.protocols import OddPairGeneratorFn, odd_pair_generators_bfs
+from veriphix.protocols import OddPairGeneratorFn, odd_pair_generators_bfs, GraphStabilizer
 
 type Trap = frozenset[int]
 type Node = int
@@ -103,7 +103,31 @@ class Dummyless(VerificationStrategy[nx.Graph]):
 
     @override
     def build_sampler(self) -> EnumeratedTestSampler:
-        pass
+        # Step 1: build per-node GraphStabilizers (dict keyed by node id)
+        stabdict: dict[int, GraphStabilizer] = {
+            node: GraphStabilizer(
+                node_indices={node},
+                string=build_stabilizer(traps=frozenset(frozenset({node})), graph=self.data),
+            )
+            for node in self.data.nodes
+        }
+
+        # Step 2: Rfull = product of all S_v
+        n_qubits = len(client.clifford_structure)
+        identity = GraphStabilizer(node_indices=set(), string=stim.PauliString(n_qubits))
+        rfull: GraphStabilizer = reduce(mul, stabdict.values(), identity)
+
+        # (removing S_v leaves I at v and flips Z count on its neighbours — stays in I/X/Y)
+        # Step 3a: for each even-degree node v, R\v = Rfull * S_v
+        generators: list[GraphStabilizer] = [
+            rfull * stabdict[v] for v, degree in client.graph.degree if degree % 2 == 0
+        ]
+
+        # Step 3b: one R\(u,w) generator per odd-degree node pair
+        generators.extend(self.odd_pair_generator(client.graph, stabdict, rfull))
+
+        # Step 4: build TestRuns — each generator's node_indices form one multi-qubit trap
+        return [TestRun(client=client, traps=frozenset({frozenset(gs.node_indices)})) for gs in generators]
 
 
 @dataclass
@@ -143,7 +167,7 @@ class FK12(VerificationStrategy[nx.Graph]):
                 for colored_node in nodes_by_color[color]
             )
             stabilizer = build_stabilizer(traps, self.data)
-            tests.append(Test(self.data, traps, stabilizer))
+            tests.append(Test(graph=self.data, traps=traps, stabilizer=stabilizer))
 
         return EnumeratedTestSampler(tests)
 
