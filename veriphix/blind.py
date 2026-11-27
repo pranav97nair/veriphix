@@ -12,12 +12,10 @@ from graphix.rng import ensure_rng
 from graphix.sim.statevec import Statevector
 
 if TYPE_CHECKING:
-
     import numpy.typing as npt
     from graphix.fundamentals import Angle
     from graphix.measurements import Outcome
     from graphix.opengraph import _AM_co
-    from graphix.sim.statevec import Statevector
     from graphix.states import State
     from numpy.random import Generator
 
@@ -55,7 +53,7 @@ class Secrets:
         self._r = {node: outcome(rng.integers(2) == 1) for node in og.graph.nodes} if flags.r else {}
         self._a = {input_node: outcome(rng.integers(2) == 1) for input_node in og.input_nodes} if flags.a else {}
         self._a_neigh = (
-            {node: outcome(sum([self.a[j] for j in og.neighbors(node)]) % 2 == 1) for node in og.graph.nodes}
+            {node: outcome(sum([self.a(j) for j in og.neighbors(node)]) % 2 == 1) for node in og.graph.nodes}
             if flags.a
             else {}
         )
@@ -63,13 +61,13 @@ class Secrets:
             {measured_node: rng.integers(8) * ANGLE_PI / 4 for measured_node in og.measurements} if flags.theta else {}
         )
 
-    def r(node: Node) -> Outcome:
+    def r(self, node: Node) -> Outcome:
         return self._r.get(node, 0)
 
-    def a(node: InputNode) -> Outcome:
+    def a(self, node: InputNode) -> Outcome:
         return self._a.get(node, 0)
 
-    def a_neigh(node: Node) -> Outcome:
+    def a_neigh(self, node: Node) -> Outcome:
         return self._a_neigh.get(node, 0)
 
     def blind_angle(self, node: MeasuredNode) -> Angle:

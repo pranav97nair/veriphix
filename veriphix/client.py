@@ -16,7 +16,6 @@ from graphix.rng import ensure_rng
 from graphix.sim.statevec import Statevector
 from graphix.simulator import MeasureMethod, PrepareMethod
 from graphix.states import BasicStates, State
-from stim import PauliString
 from typing_extensions import override
 
 from veriphix.blind import SecretFlags
@@ -40,6 +39,7 @@ if TYPE_CHECKING:
     from graphix.sim.base_backend import Backend
     from graphix.states import PlanarState
     from numpy.random import Generator
+    from stim import PauliString
 
     _StateT = TypeVar("_StateT")
     type Node = int

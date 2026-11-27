@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from graphix.measurements import Outcome
     from verifying.client import PrivateData
 
-    from veriphix.blind import SecretsV2
+    from veriphix.blind import Secrets
 
 
 @dataclass
 class DelegateMeasureMethod(MeasureMethod):
-    secrets: SecretsV2
+    secrets: Secrets
     private: PrivateData
     results: dict[int, Outcome] = dataclasses.field(default_factory=dict)
 
@@ -41,7 +41,7 @@ class DelegateMeasureMethod(MeasureMethod):
         # Compensate the blinding inside the measurement angle: the `a` encryption
         # flips the angle sign (it commutes the X Pauli through the measurement)
         # and the `theta` encryption is added back via `blind_angle`.
-        phase = Sign.minus_if(bool(secrets.a(cmd.node)))
+        phase = Sign.minus_if(bool(self.secrets.a(cmd.node)))
         angle = phase * bloch.angle + self.secrets.blind_angle(cmd.node)
         return BlochMeasurement(angle, bloch.plane)
 
